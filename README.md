@@ -1,2 +1,2 @@
-# ITESM_Neptune_IMX8
-Multi display automotive infotainment on Toradex IMX8 board
+# ITESM_Neptune_IMX7
+Multi display automotive infotainment on Toradex Colibri IMX7 board
