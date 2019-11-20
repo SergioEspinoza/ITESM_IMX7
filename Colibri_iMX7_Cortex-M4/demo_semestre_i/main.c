@@ -63,6 +63,10 @@
 
 #define MAX_RPMSG_LENGTH 512
 
+#define TIME_OUT_FOREVER 0xFFFFFFFF
+
+#define APP_TASK_STACK_SIZE 512
+
 /*-----------------------------------------------------------*/
 
 /* Initialize CAN communication */
@@ -70,8 +74,12 @@ static void can_init(void);
 /* Task processing queue of incomming CAN messages */
 static void can_process_rx_queue_task(void *pv_param);
 
+
 /* Receives RPMsg control messages */ 
 static void rpmsg_receive_task(void *pv_param);
+
+/* Send RPMsg in a channel already init */
+void rpmsg_transmit(const char *message, int length);
 
 /*-----------------------------------------------------------*/
 
@@ -82,11 +90,11 @@ static flexcan_msgbuf_t *rxMsgBufPtr;
 static QueueHandle_t rx_can_msg_queue;
 
 /* RPMsg communication started */
-volatile uint8_t send_rpmsg = 0U;
+volatile uint8_t send_rpmsg = 0;
 
 /* Communication channel for RPMsg */
-struct rpmsg_channel *app_chnl = NULL;
-struct remote_device *rdev = NULL;
+static struct rpmsg_channel *app_chnl = NULL;
+static struct remote_device *rdev = NULL;
 
 /*-----------------------------------------------------------*/
 
@@ -100,21 +108,25 @@ int main(void)
     /* Initialize CAN communication */
     can_init();
 
-    /* Prepare for the MU Interrupt */
+   /* Prepare for the MU Interrupt */
     MU_Init(BOARD_MU_BASE_ADDR);
-    NVIC_SetPriority(BOARD_MU_IRQ_NUM, 3);
+    NVIC_SetPriority(BOARD_MU_IRQ_NUM, 2);
     NVIC_EnableIRQ(BOARD_MU_IRQ_NUM);
+
+    PRINTF("\r\n**************************\r\n");
+    PRINTF("demo_semestre_i - %s\r\n", __TIME__);
+    PRINTF("**************************\r\n\r\n");
 
     /* Create the Rx CAN message queue */
     rx_can_msg_queue = xQueueCreate(CAN_RX_MSG_QUEUE_LENGTH, sizeof(flexcan_msgbuf_t));
 
     /* Create a rpmsg control task. */
-    xTaskCreate(rpmsg_receive_task, "Reeive RPMsg commands", configMINIMAL_STACK_SIZE, NULL, tskIDLE_PRIORITY+1, NULL);
+    xTaskCreate(rpmsg_receive_task, "Reeive RPMsg commands", APP_TASK_STACK_SIZE, NULL, tskIDLE_PRIORITY+1, NULL);
 
     /* Create the task to process the CAN messages */
-    xTaskCreate(can_process_rx_queue_task,         /* The function that implements the task. */
+    xTaskCreate(can_process_rx_queue_task,    /* The function that implements the task. */
                 "Process CAN message queue",  /* The text name assigned to the task - for debug only as it is not used by the kernel. */
-                configMINIMAL_STACK_SIZE,     /* The size of the stack to allocate to the task. */
+                APP_TASK_STACK_SIZE,          /* The size of the stack to allocate to the task. */
                 NULL,                         /* The parameter passed to the task - not used in this simple case. */
                 tskIDLE_PRIORITY+1,           /* The priority assigned to the task. */
                 NULL);                        /* The task handle is not required, so NULL is passed. */
@@ -190,38 +202,24 @@ void can_init(void)
 void can_process_rx_queue_task(void *pv_param)
 {
     flexcan_msgbuf_t rx_message;
-    // char message[MAX_RPMSG_LENGTH];
-
-    // PRINTF("%s - %s\r\n", __FUNCTION__, __TIME__);
+    char message[100];
+    static uint8_t count = 0;
 
     while (true)
     {
         /* Wait until something arrives in the queue */
         xQueueReceive(rx_can_msg_queue, &rx_message, portMAX_DELAY);
-#if 0
-        PRINTF("%s, id=0x%3x\n\r", __FUNCTION__, rx_message.idStd);
+
         if (send_rpmsg)
         {
             /* Copy string to RPMsg tx buffer */
-            sprintf(message, "id=%lu, payload=%lu %lu\r\n", rx_message.id, rx_message.word0, rx_message.word1);
-            PRINTF("%s, message = %s\r\n", __FUNCTION__, message);
-
-            // rpmsg_transmit(message, strlen(message));
+            sprintf(message, "%3d, id=0x%3X, payload=%02X %02X %02X %02X %02X %02X %02X %02X\r\n", count++, rx_message.idStd,
+                                                                                                   rx_message.data0, rx_message.data1,
+                                                                                                   rx_message.data2, rx_message.data3,
+                                                                                                   rx_message.data4, rx_message.data5,
+                                                                                                   rx_message.data6, rx_message.data7);
+            rpmsg_transmit(message, strlen(message));
         }
-#endif
-
-
-        // PRINTF("Message received: %d\n\r", count++);
-        // PRINTF("DLC=%d, mb_idx=0x%3x\n\r", rx_message.dlc, rx_message.idStd);
-        // PRINTF("RX MB data:\n\r");
-        // PRINTF("%02X %02X %02X %02X %02X %02X %02X %02X \n\r", rx_message.data0,
-        //                                                        rx_message.data1,
-        //                                                        rx_message.data2,
-        //                                                        rx_message.data3,
-        //                                                        rx_message.data4,
-        //                                                        rx_message.data5,
-        //                                                        rx_message.data6,
-        //                                                        rx_message.data7);
    }
 }
 
@@ -252,31 +250,7 @@ void BOARD_FLEXCAN_HANDLER(void)
     }
 }
 
-void rpmsg_receive(char *received_msg, int *length)
-{
-    unsigned long src;
-    int result;
-
-    void *rx_buf; /* pointer to rx shared buffer */
-
-    /* Get RPMsg rx buffer with message */
-    result = rpmsg_rtos_recv_nocopy(app_chnl->rp_ept, &rx_buf, length, &src, 0xFFFFFFFF);
-    assert(result == 0);
-    // PRINTF("length=%d, src=%d\r\n", *length, src);
-
-    /* Each RPMSG buffer can carry less than 512 payload */
-    assert(*length < MAX_RPMSG_LENGTH);
-    /* Copy string from RPMsg rx buffer */
-    memcpy(received_msg, rx_buf, *length);
-    /* End string by '\0' */
-    received_msg[*length] = 0; 
-
-    /* Release held RPMsg rx buffer */
-    result = rpmsg_rtos_recv_nocopy_free(app_chnl->rp_ept, rx_buf);
-    assert(result == 0);
-}
-
-void rpmsg_transmit(char *transmit_msg, int length)
+void rpmsg_transmit(const char *message, int length)
 {
     void *tx_buf;
     unsigned long size;
@@ -287,10 +261,10 @@ void rpmsg_transmit(char *transmit_msg, int length)
     assert(tx_buf);
 
     /* Copy string to RPMsg tx buffer */
-    memcpy(tx_buf, transmit_msg, length);
+    memcpy(tx_buf, message, length);
 
     /* Echo back received message with nocopy send */
-    result = rpmsg_rtos_send_nocopy(app_chnl->rp_ept, tx_buf, length, 1024);
+    result = rpmsg_rtos_send_nocopy(app_chnl->rp_ept, tx_buf, length, app_chnl->dst);
     assert(result == 0);
 }
 
@@ -299,30 +273,40 @@ void rpmsg_transmit(char *transmit_msg, int length)
  */
 void rpmsg_receive_task(void *pv_param)
 {
+    int result;
+    void *rx_buf;
+    int len;
+    unsigned long src;
     char received_msg[MAX_RPMSG_LENGTH];
-    int length, result;
 
-    PRINTF("%s - %s\r\n", __FUNCTION__, __TIME__);
-
-    /* Initializes the rpmsg driver resources */
-    /* RPMSG Init as REMOTE */
-    result = rpmsg_rtos_init(0, &rdev, RPMSG_MASTER, &app_chnl);
+    result = rpmsg_rtos_init(0 /*REMOTE_CPU_ID*/, &rdev, RPMSG_MASTER, &app_chnl);
     assert(result == 0);
-    PRINTF("Name service handshake is done, M4 has setup a rpmsg channel [%d ---> %d]\r\n", app_chnl->src, app_chnl->dst);
+    PRINTF("Handshake is done, M4 has setup a rpmsg channel [%d ---> %d]\r\n", app_chnl->src, app_chnl->dst);
 
-    while (1)
+    for (;;)
     {
-        rpmsg_receive(received_msg, &length);
+        /* Get RPMsg rx buffer with message */
+        result = rpmsg_rtos_recv_nocopy(app_chnl->rp_ept, &rx_buf, &len, &src, TIME_OUT_FOREVER);
+        assert(result == 0);
+
+        /* Copy string from RPMsg rx buffer */
+        assert(len < sizeof(received_msg));
+        memcpy(received_msg, rx_buf, len);
+        received_msg[len] = 0; /* End string by '\0' */
+
+        /* Release held RPMsg rx buffer */
+        result = rpmsg_rtos_recv_nocopy_free(app_chnl->rp_ept, rx_buf);
+        assert(result == 0);
+
         if (strcmp(received_msg, "start") == 0)
         {
             send_rpmsg = 1;
-            rpmsg_transmit("OK", 2);
-            PRINTF("start!\r\n");
         }
-        else
+        else if (strcmp(received_msg, "stop") == 0)
         {
-            rpmsg_transmit("NACK", 2);
+            send_rpmsg = 0;
         }
+        PRINTF("%s\r\n", received_msg);
     }
 }
 
